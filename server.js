@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 const root = process.cwd();
 const rooms = new Map();
@@ -29,7 +29,7 @@ function remove(peer) {
 }
 server.on('upgrade', (req, socket) => {
   const key = req.headers['sec-websocket-key']; if (!key) { socket.destroy(); return; }
-  const accept = Buffer.from(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).toString('base64');
+  const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
   const peer = { socket, id:randomUUID(), room:'', name:'Гість', buffer:Buffer.alloc(0), closed:false };
   socket.on('data', chunk => {
