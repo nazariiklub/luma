@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0b0b10">
+  <title>Luma — дивіться разом</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet"><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-mark"><i></i><i></i><i></i></span><span>luma<span class="brand-dot">.</span></span></a>
+    <div class="top-center"><span class="live-dot"></span><span id="headerRoom">Твоя приватна кімната</span><span class="top-divider"></span><span class="quality-pill">4K READY</span></div>
+    <div class="top-actions"><button class="icon-button" id="helpButton" aria-label="Інформація"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9a2.5 2.5 0 1 1 4.4 1.6c-1.2 1.1-2 1.5-2 3M12 17.5h.01"/></svg></button><div class="avatar avatar-me" id="topAvatar">Т</div></div>
+  </header>
+
+  <main class="app-shell">
+    <aside class="sidebar">
+      <div class="side-label">ТВОЯ ПРОСТОРА</div>
+      <button class="side-link active" id="watchNav"><span class="side-icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10 9 5 3-5 3z"/></svg></span>Спільний перегляд</button>
+      <button class="side-link" id="inviteNav"><span class="side-icon"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M10 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM19 8v6M22 11h-6"/></svg></span>Запросити друзів<span class="side-count">4</span></button>
+      <div class="side-bottom"><div class="privacy-card"><div class="privacy-icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z"/><path d="m9 12 2 2 4-4"/></svg></div><strong>Тільки свої</strong><p>Кімната приватна. Посилання маєш лише ти.</p><div class="privacy-status"><span></span>Захищене з’єднання</div></div><div class="side-footer">LUMA · ДИВІТЬСЯ РАЗОМ</div></div>
+    </aside>
+
+    <section class="main-content">
+      <div class="room-heading"><div><div class="eyebrow"><span class="eyebrow-line"></span>ТВОЯ КІМНАТА <span class="eyebrow-code" id="roomCode"># LUMA-0000</span></div><h1>Кіно краще <span>разом.</span></h1><p class="heading-sub">Запроси друзів, увімкни відео — і нехай вечір почнеться.</p></div><button class="invite-button" id="inviteButton"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Запросити друзів</button></div>
+
+      <div class="stage" id="stage">
+        <div class="stage-glow"></div>
+        <div class="stage-top"><div class="now-playing"><span class="playing-bars"><i></i><i></i><i></i><i></i></span><span id="stageTitle">ЗАЛ ОЧІКУВАННЯ</span></div><div class="stage-top-right"><span class="stream-badge" id="streamBadge"><span></span>ПРЯМИЙ ЕФІР</span><button class="expand-button" id="expandButton" aria-label="На весь екран"><svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg></button></div></div>
+        <video id="mainVideo" autoplay playsinline></video>
+        <div class="empty-stage" id="emptyStage"><div class="poster-art"><div class="poster-orbit orbit-one"></div><div class="poster-orbit orbit-two"></div><div class="poster-core"><span class="poster-play"><svg viewBox="0 0 24 24"><path d="m9 6 10 6-10 6z"/></svg></span></div><div class="poster-star star-a">✳</div><div class="poster-star star-b">✦</div><div class="poster-star star-c">·</div></div><div class="empty-title">Тиша перед фільмом<span>.</span></div><p class="empty-copy">Поділись вкладкою або екраном —<br>усі побачать це в найкращій якості.</p><button class="start-share" id="startShare"><span class="share-icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4M10 10l2-2 2 2M12 8v5"/></svg></span><span><strong>Почати трансляцію</strong><small>Екран · вкладка · вікно</small></span><span class="button-arrow">↗</span></button><div class="quality-note"><span class="quality-spark">✦</span>До 4K · Без таймерів і лімітів</div></div>
+        <div class="stage-bottom"><span class="stage-hint" id="stageHint">Твоя кімната чекає на прем’єру</span><span class="stage-resolution" id="resolutionLabel">ДО 4K <i></i> P2P ТРАНСЛЯЦІЯ</span></div>
+      </div>
+
+      <div class="control-bar"><div class="controls-left"><button class="control-button" id="micButton"><span class="control-icon"><svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg></span><span>Мікрофон</span><b class="control-state" id="micState">ВИМКН.</b></button><button class="control-button" id="soundButton"><span class="control-icon"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4zM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg></span><span>Звук</span><b class="control-state on" id="soundState">УВІМКН.</b></button></div><div class="controls-right"><div class="viewer-count"><div class="mini-avatars" id="miniAvatars"><span class="mini-avatar mini-me">Т</span></div><span><b id="viewerCount">1</b> у кімнаті</span></div><button class="leave-button" id="leaveButton"><svg viewBox="0 0 24 24"><path d="M10 17l5-5-5-5M15 12H3M21 3v18"/></svg>Вийти</button></div></div>
+
+      <div class="people-section"><div class="people-heading"><div><span class="section-kicker">ВАШЕ КОЛО</span><h2>Хто дивиться <span>з тобою</span></h2></div><span class="people-capacity" id="capacityLabel">01 <i>/</i> 04 МІСЦЯ</span></div><div class="people-grid" id="peopleGrid"></div><div class="bottom-note"><span class="bottom-note-icon">✦</span>Відео й звук синхронізуються автоматично <span class="note-sep">·</span> Просто будьте поруч</div></div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast"><span class="toast-check">✓</span><span id="toastText">Посилання скопійовано</span></div>
+  <div class="modal-backdrop" id="modal"><div class="modal"><button class="modal-close" id="modalClose">×</button><div class="modal-orb">✦</div><span class="section-kicker">LUMA ROOM</span><h2>Запроси своїх.</h2><p>Чотири місця. Один спільний екран. Стільки вечорів, скільки захочеться.</p><div class="link-box"><span id="inviteLink">—</span><button id="copyLink">Копіювати</button></div><div class="modal-foot"><span>🔒 Приватне посилання</span><span>∞ Без обмежень у часі</span></div></div></div>
+  <script src="/app.js"></script>
+</body>
+</html>
