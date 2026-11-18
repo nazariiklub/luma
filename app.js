@@ -1,32 +1,439 @@
-const $=s=>document.querySelector(s);const qs=new URLSearchParams(location.search);const makeRoom=()=>Math.random().toString(36).slice(2,8).toUpperCase();let roomId=qs.get('room')||makeRoom().toLowerCase();let myName=localStorage.getItem('luma-name')||`Гість ${Math.floor(100+Math.random()*900)}`;let myId='',socket,roomPeers=new Map(),connections=new Map(),screenStream=null,micStream=null,micOn=false,soundOn=true,shareOwner='',toastTimer;
-const colors=['linear-gradient(135deg,#7f65b2,#bf8eb5)','linear-gradient(135deg,#4a8290,#8dc2ad)','linear-gradient(135deg,#b6746c,#d8b17b)','linear-gradient(135deg,#6170a4,#a895d2)'];
-$('#roomCode').textContent=`# LUMA-${roomId.slice(0,4).toUpperCase()}`;$('#headerRoom').textContent=`Кімната LUMA-${roomId.slice(0,4).toUpperCase()}`;$('#topAvatar').textContent=myName[0]?.toUpperCase()||'Т';
-function toast(msg){$('#toastText').textContent=msg;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),2300)}
-function modal(open){$('#modal').classList.toggle('open',open);$('#inviteLink').textContent=`${location.origin}/?room=${roomId}`}
-function signal(data){if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify(data))}
-function invite(){modal(true)}
-$('#inviteButton').onclick=invite;$('#inviteNav').onclick=invite;$('#modalClose').onclick=()=>modal(false);$('#modal').onclick=e=>{if(e.target===$('#modal'))modal(false)};$('#copyLink').onclick=async()=>{try{await navigator.clipboard.writeText($('#inviteLink').textContent);toast('Посилання скопійовано')}catch{toast('Скопіюй посилання з поля вище')}};
-$('#helpButton').onclick=()=>toast('До 4 учасників · відео транслюється напряму між браузерами');$('#watchNav').onclick=()=>$('#stage').scrollIntoView({behavior:'smooth',block:'center'});
-$('#topAvatar').title='Змінити ім’я';$('#topAvatar').style.cursor='pointer';$('#topAvatar').onclick=()=>{const next=prompt('Твоє ім’я у кімнаті',myName);if(next?.trim()){myName=next.trim().slice(0,24);localStorage.setItem('luma-name',myName);$('#topAvatar').textContent=myName[0].toUpperCase();signal({type:'name',name:myName});renderPeople()}};
-function renderPeople(){const peers=[{id:myId||'self',name:myName,me:true},...roomPeers.values()];$('#viewerCount').textContent=peers.length;$('#capacityLabel').innerHTML=`${String(peers.length).padStart(2,'0')} <i>/</i> 04 МІСЦЯ`;
-  $('#miniAvatars').innerHTML=peers.map((p,i)=>`<span class="mini-avatar ${p.me?'mini-me':''}" style="background:${p.me?'linear-gradient(135deg,#8b69c9,#d67fb2)':colors[(i-1)%4]}">${esc(p.name[0]||'Г')}</span>`).join('');
-  const occupied=peers.map((p,i)=>{const broadcaster=shareOwner===p.id;return `<div class="person-card ${p.me?'me':''} ${broadcaster?'speaking':''}"><span class="person-avatar" style="background:${p.me?'linear-gradient(135deg,#8b69c9,#d67fb2)':colors[(i-1)%4]}">${esc(p.name[0]||'Г')}</span><span class="person-info"><span class="person-name">${esc(p.me?'Ти':p.name)}${p.me?' (це ти)':''}</span><span class="person-role">${broadcaster?'Транслює зараз':p.me?'Господар кімнати':'У кімнаті'}</span></span><span class="person-presence ${broadcaster?'broadcasting':'online'}"></span></div>`}).join('');
-  const slots=Math.max(0,4-peers.length);const empty=Array.from({length:slots},(_,i)=>`<div class="person-card empty"><span class="empty-add">+</span><span class="empty-person">Вільне місце<small>Запроси друга</small></span></div>`).join('');$('#peopleGrid').innerHTML=occupied+empty;
+const $ = selector => document.querySelector(selector);
+const query = new URLSearchParams(location.search);
+const createRoomCode = () => Math.random().toString(36).slice(2, 8).toLowerCase();
+const makeBrowserId = () => {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  return [...crypto.getRandomValues(new Uint8Array(16))].map(byte => byte.toString(16).padStart(2, '0')).join('');
+};
+
+let roomId = query.get('room') || createRoomCode();
+if (!query.has('room')) history.replaceState(null, '', `/?room=${roomId}`);
+let userId = localStorage.getItem('luma-user-id');
+if (!userId) { userId = makeBrowserId(); localStorage.setItem('luma-user-id', userId); }
+let myName = localStorage.getItem('luma-name') || '';
+let myId = userId;
+let socket, roomPeers = new Map(), connections = new Map(), remoteStreams = new Map();
+let publishStream = null, publishMode = '', micStream = null, micOn = false, soundOn = true;
+let publishOwner = '', toastTimer, heartbeatTimer, qualityTimer, rejectedFromRoom = false;
+
+const colors = [
+  'linear-gradient(135deg,#7f65b2,#bf8eb5)', 'linear-gradient(135deg,#4a8290,#8dc2ad)',
+  'linear-gradient(135deg,#b6746c,#d8b17b)', 'linear-gradient(135deg,#6170a4,#a895d2)'
+];
+
+$('#roomCode').textContent = `# LUMA-${roomId.slice(0, 4).toUpperCase()}`;
+$('#headerRoom').textContent = `Кімната LUMA-${roomId.slice(0, 4).toUpperCase()}`;
+$('#topAvatar').textContent = myName ? myName[0].toUpperCase() : '?';
+
+function toast(message) {
+  $('#toastText').textContent = message;
+  $('#toast').classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $('#toast').classList.remove('show'), 3000);
 }
-function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function setupSocket(){const proto=location.protocol==='https:'?'wss:':'ws:';socket=new WebSocket(`${proto}//${location.host}`);socket.onopen=()=>{signal({type:'join',room:roomId,name:myName});setInterval(()=>signal({type:'ping'}),4*60*1000)};socket.onmessage=async ev=>{const msg=JSON.parse(ev.data);if(msg.type==='full'){toast('У цій кімнаті вже 4 учасники');return}if(msg.type==='joined'){myId=msg.id;roomPeers.clear();msg.peers.forEach(p=>roomPeers.set(p.id,p));renderPeople()}
-    if(msg.type==='peer-joined'){roomPeers.set(msg.id,{id:msg.id,name:msg.name});renderPeople();makeConnection(msg.id,true)}
-    if(msg.type==='peer-left'){roomPeers.delete(msg.id);connections.get(msg.id)?.close();connections.delete(msg.id);if(shareOwner===msg.id){shareOwner='';showVideo(null)}renderPeople()}
-    if(msg.type==='peer-name'){const p=roomPeers.get(msg.id);if(p){p.name=msg.name;renderPeople()}}
-    if(msg.type==='sharing'){if(msg.active)shareOwner=msg.id;else if(shareOwner===msg.id){shareOwner='';showVideo(null)}renderPeople();updateStage()}
-    if(msg.type==='signal'){const pc=connections.get(msg.from)||makeConnection(msg.from,false);await handleSignal(pc,msg.from,msg.data)}
-  };socket.onclose=()=>{};socket.onerror=()=>toast('Не вдалося з’єднатися із сервером кімнати')}
-function makeConnection(id,initiator){if(connections.has(id))return connections.get(id);const pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});connections.set(id,pc);pc.onicecandidate=e=>{if(e.candidate)signal({type:'signal',to:id,data:{candidate:e.candidate}})};pc.ontrack=e=>{const stream=e.streams[0]||new MediaStream([e.track]);if(shareOwner===id||!shareOwner){shareOwner=id;showVideo(stream);updateStage();renderPeople()}};pc.onconnectionstatechange=()=>{if(pc.connectionState==='failed')toast('Зв’язок перервався — перевір інтернет')};if(screenStream)screenStream.getTracks().forEach(t=>pc.addTrack(t,screenStream));if(micStream&&micOn)micStream.getAudioTracks().forEach(t=>pc.addTrack(t,micStream));if(initiator)pc.createOffer().then(offer=>pc.setLocalDescription(offer)).then(()=>signal({type:'signal',to:id,data:{description:pc.localDescription}})).catch(()=>{});return pc}
-async function handleSignal(pc,id,data){try{if(data.description){await pc.setRemoteDescription(data.description);if(data.description.type==='offer'){const answer=await pc.createAnswer();await pc.setLocalDescription(answer);signal({type:'signal',to:id,data:{description:pc.localDescription}})}}else if(data.candidate)await pc.addIceCandidate(data.candidate)}catch(e){console.warn('WebRTC negotiation error',e)}}
-function showVideo(stream){const video=$('#mainVideo');if(video.srcObject!==stream)video.srcObject=stream;video.muted=!soundOn;$('#stage').classList.toggle('video-active',!!stream);if(stream)video.play().catch(()=>{});}
-function updateStage(){const active=!!shareOwner;$('#streamBadge').classList.toggle('active',active);$('#stageTitle').textContent=active?'ЗАРАЗ ДИВИТЕСЬ РАЗОМ':'ЗАЛ ОЧІКУВАННЯ';$('#stageHint').textContent=active?'Відео транслюється наживо':'Твоя кімната чекає на прем’єру';}
-async function stopShare(){if(!screenStream)return;signal({type:'sharing',active:false});connections.forEach(pc=>pc.getSenders().forEach(s=>{if(screenStream.getTracks().includes(s.track))s.replaceTrack(null).catch(()=>{})}));screenStream.getTracks().forEach(t=>t.stop());screenStream=null;shareOwner='';showVideo(null);updateStage();renderPeople();$('#startShare').querySelector('strong').textContent='Почати трансляцію';$('#resolutionLabel').innerHTML='ДО 4K <i></i> P2P LIVE'}
-$('#startShare').onclick=async()=>{if(screenStream){await stopShare();return}if(shareOwner&&shareOwner!==myId){toast('Зачекай, поки завершиться поточна трансляція');return}try{screenStream=await navigator.mediaDevices.getDisplayMedia({video:{frameRate:{ideal:30,max:60},width:{ideal:3840},height:{ideal:2160}},audio:true,preferCurrentTab:true});shareOwner=myId;screenStream.getVideoTracks()[0].addEventListener('ended',stopShare,{once:true});for(const [id,pc]of connections){screenStream.getTracks().forEach(t=>pc.addTrack(t,screenStream));try{const offer=await pc.createOffer();await pc.setLocalDescription(offer);signal({type:'signal',to:id,data:{description:pc.localDescription}})}catch(e){console.warn(e)}for(const t of screenStream.getVideoTracks()){const sender=pc.getSenders().find(s=>s.track===t);if(sender){const params=sender.getParameters();params.encodings=params.encodings?.length?params.encodings:[{}];params.encodings[0].maxBitrate=18000000;params.encodings[0].maxFramerate=60;sender.setParameters(params).catch(()=>{})}}}signal({type:'sharing',active:true});showVideo(screenStream);updateStage();renderPeople();$('#startShare').querySelector('strong').textContent='Зупинити трансляцію';const track=screenStream.getVideoTracks()[0];$('#resolutionLabel').innerHTML=`${track.getSettings().width||'HD'} × ${track.getSettings().height||''} <i></i> LIVE`;toast('Трансляція почалася')}catch(e){if(e.name!=='NotAllowedError')toast('Браузер не зміг відкрити трансляцію');screenStream=null}};
-$('#micButton').onclick=async()=>{if(!micOn){try{micStream=await navigator.mediaDevices.getUserMedia({audio:true});micOn=true;micStream.getAudioTracks().forEach(t=>connections.forEach(pc=>pc.addTrack(t,micStream)));for(const [id,pc]of connections){const offer=await pc.createOffer();await pc.setLocalDescription(offer);signal({type:'signal',to:id,data:{description:pc.localDescription}})}}catch{toast('Дозволь доступ до мікрофона в браузері');return}}else{micOn=false;micStream?.getAudioTracks().forEach(t=>t.enabled=false)}$('#micState').textContent=micOn?'УВІМКН.':'ВИМКН.';$('#micState').classList.toggle('on',micOn);$('#micButton').classList.toggle('muted',!micOn);if(micOn)micStream?.getAudioTracks().forEach(t=>t.enabled=true)};
-$('#soundButton').onclick=()=>{soundOn=!soundOn;$('#soundState').textContent=soundOn?'УВІМКН.':'ВИМКН.';$('#soundState').classList.toggle('on',soundOn);$('#mainVideo').muted=!soundOn};$('#expandButton').onclick=()=>{if(!document.fullscreenElement)$('#stage').requestFullscreen?.();else document.exitFullscreen?.()};$('#leaveButton').onclick=()=>{socket?.close();screenStream?.getTracks().forEach(t=>t.stop());micStream?.getTracks().forEach(t=>t.stop());connections.forEach(pc=>pc.close());connections.clear();roomPeers.clear();myId='';renderPeople();toast('Ти вийшов із кімнати')};
-document.addEventListener('keydown',e=>{if(e.key==='Escape')modal(false)});renderPeople();setupSocket();
+function signal(data) {
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(data));
+}
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[char]);
+}
+function openInvite() {
+  $('#inviteLink').textContent = `${location.origin}/?room=${roomId}`;
+  $('#modal').classList.add('open');
+}
+$('#inviteButton').onclick = openInvite;
+$('#inviteNav').onclick = openInvite;
+$('#modalClose').onclick = () => $('#modal').classList.remove('open');
+$('#modal').onclick = event => { if (event.target === $('#modal')) $('#modal').classList.remove('open'); };
+$('#copyLink').onclick = async () => {
+  try { await navigator.clipboard.writeText($('#inviteLink').textContent); toast('Посилання скопійовано'); }
+  catch { toast('Скопіюй посилання з поля вище'); }
+};
+$('#helpButton').onclick = () => toast('До 4 людей · анонімний профіль цього браузера');
+$('#watchNav').onclick = () => $('#stage').scrollIntoView({ behavior:'smooth', block:'center' });
+
+function setMicUi() {
+  $('#micState').textContent = micOn ? 'УВІМКН.' : 'ВИМКН.';
+  $('#micState').classList.toggle('on', micOn);
+  $('#micButton').classList.toggle('muted', !micOn);
+}
+function showVideo(stream, { local = false } = {}) {
+  const video = $('#mainVideo');
+  if (video.srcObject !== stream) video.srcObject = stream;
+  video.muted = local || !soundOn;
+  $('#stage').classList.toggle('video-active', !!stream);
+  if (stream) video.play().catch(() => {});
+}
+function updateStage() {
+  const active = !!publishOwner;
+  $('#streamBadge').classList.toggle('active', active);
+  $('#stageTitle').textContent = active ? 'ЗАРАЗ ДИВИТЕСЬ РАЗОМ' : 'ЗАЛ ОЧІКУВАННЯ';
+  $('#stageHint').textContent = active ? 'Трансляція наживо · адаптивна якість' : 'Твоя кімната чекає на прем’єру';
+}
+
+function renderPeople() {
+  const people = [{ id:myId, name:myName || 'Ти', me:true }, ...roomPeers.values()];
+  $('#viewerCount').textContent = people.length;
+  $('#capacityLabel').innerHTML = `${String(people.length).padStart(2, '0')} <i>/</i> 04 МІСЦЯ`;
+  $('#miniAvatars').innerHTML = people.map((person, index) =>
+    `<span class="mini-avatar ${person.me ? 'mini-me' : ''}" style="background:${person.me ? 'linear-gradient(135deg,#8b69c9,#d67fb2)' : colors[(index - 1) % 4]}">${escapeHtml(person.name[0] || 'Г')}</span>`
+  ).join('');
+  const occupied = people.map((person, index) => {
+    const broadcasting = publishOwner === person.id;
+    return `<div class="person-card ${person.me ? 'me' : ''} ${broadcasting ? 'speaking' : ''}">
+      <span class="person-avatar" style="background:${person.me ? 'linear-gradient(135deg,#8b69c9,#d67fb2)' : colors[(index - 1) % 4]}">${escapeHtml(person.name[0] || 'Г')}</span>
+      <span class="person-info"><span class="person-name">${escapeHtml(person.me ? myName : person.name)}${person.me ? ' (це ти)' : ''}</span>
+      <span class="person-role">${broadcasting ? 'Транслює зараз' : person.me ? 'Твій профіль' : 'У кімнаті'}</span></span>
+      <span class="person-presence ${broadcasting ? 'broadcasting' : 'online'}"></span></div>`;
+  }).join('');
+  const empty = Array.from({ length:Math.max(0, 4 - people.length) }, () =>
+    '<div class="person-card empty"><span class="empty-add">+</span><span class="empty-person">Вільне місце<small>Запроси друга</small></span></div>'
+  ).join('');
+  $('#peopleGrid').innerHTML = occupied + empty;
+}
+
+function startSession(name) {
+  myName = name.trim().slice(0, 24);
+  if (!myName) return;
+  localStorage.setItem('luma-name', myName);
+  $('#topAvatar').textContent = myName[0].toUpperCase();
+  $('#welcomeModal').classList.remove('visible');
+  renderPeople();
+  setupSocket();
+}
+$('#welcomeForm').onsubmit = event => {
+  event.preventDefault();
+  startSession($('#welcomeName').value);
+};
+if (myName) setupSocket();
+else {
+  $('#welcomeModal').classList.add('visible');
+  $('#welcomeName').focus();
+}
+
+$('#topAvatar').title = 'Змінити ім’я';
+$('#topAvatar').style.cursor = 'pointer';
+$('#topAvatar').onclick = () => {
+  const next = prompt('Твоє ім’я у кімнаті', myName);
+  if (!next?.trim()) return;
+  myName = next.trim().slice(0, 24);
+  localStorage.setItem('luma-name', myName);
+  $('#topAvatar').textContent = myName[0].toUpperCase();
+  signal({ type:'name', name:myName });
+  renderPeople();
+};
+
+function setupSocket() {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  socket = new WebSocket(`${protocol}//${location.host}`);
+  socket.onopen = () => {
+    signal({ type:'join', room:roomId, userId, name:myName });
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = setInterval(() => signal({ type:'ping' }), 4 * 60 * 1000);
+  };
+  socket.onmessage = async event => {
+    const message = JSON.parse(event.data);
+    if (message.type === 'already-here') {
+      rejectedFromRoom = true;
+      toast('Цей профіль уже відкритий у кімнаті в іншій вкладці');
+      socket.close();
+    } else if (message.type === 'full') {
+      rejectedFromRoom = true;
+      toast('У цій кімнаті вже 4 учасники');
+      socket.close();
+    } else if (message.type === 'joined') {
+      myId = message.id;
+      roomPeers.clear();
+      message.peers.forEach(person => roomPeers.set(person.id, person));
+      renderPeople();
+    } else if (message.type === 'peer-joined') {
+      roomPeers.set(message.id, { id:message.id, name:message.name });
+      renderPeople();
+      makeConnection(message.id, true);
+      refreshSenderBudgets();
+    } else if (message.type === 'peer-left') {
+      roomPeers.delete(message.id);
+      connections.get(message.id)?.close();
+      connections.delete(message.id);
+      remoteStreams.delete(message.id);
+      if (publishOwner === message.id) { publishOwner = ''; showVideo(null); updateStage(); }
+      refreshSenderBudgets();
+      renderPeople();
+    } else if (message.type === 'peer-name') {
+      const person = roomPeers.get(message.id);
+      if (person) { person.name = message.name; renderPeople(); }
+    } else if (message.type === 'sharing') {
+      if (message.active) {
+        publishOwner = message.id;
+        if (message.id !== myId) showVideo(remoteStreams.get(message.id) || null);
+      } else if (publishOwner === message.id) {
+        publishOwner = '';
+        showVideo(null);
+      }
+      updateStage(); renderPeople();
+    } else if (message.type === 'sharing-rejected') {
+      toast('Хтось уже транслює. Твою трансляцію зупинено.');
+      if (publishOwner === myId) stopPublishing();
+    } else if (message.type === 'signal') {
+      const pc = connections.get(message.from) || makeConnection(message.from, false);
+      await handleSignal(pc, message.from, message.data);
+    }
+  };
+  socket.onerror = () => {
+    if (!rejectedFromRoom) toast('Не вдалося з’єднатися із сервером кімнати');
+  };
+  socket.onclose = () => {
+    clearInterval(heartbeatTimer);
+    if (!rejectedFromRoom) toast('З’єднання з кімнатою перервано');
+  };
+}
+
+function createRemoteStream(peerId) {
+  let stream = remoteStreams.get(peerId);
+  if (!stream) { stream = new MediaStream(); remoteStreams.set(peerId, stream); }
+  return stream;
+}
+function makeConnection(peerId, initiator) {
+  if (connections.has(peerId)) return connections.get(peerId);
+  const pc = new RTCPeerConnection({ iceServers:[{ urls:'stun:stun.l.google.com:19302' }] });
+  pc._pendingCandidates = [];
+  pc._lumaSenders = {
+    video: pc.addTransceiver('video', { direction:'sendrecv' }).sender,
+    audio: [
+      pc.addTransceiver('audio', { direction:'sendrecv' }).sender,
+      pc.addTransceiver('audio', { direction:'sendrecv' }).sender
+    ]
+  };
+  connections.set(peerId, pc);
+  pc.onicecandidate = event => { if (event.candidate) signal({ type:'signal', to:peerId, data:{ candidate:event.candidate } }); };
+  pc.ontrack = event => {
+    const stream = createRemoteStream(peerId);
+    if (!stream.getTracks().some(track => track.id === event.track.id)) stream.addTrack(event.track);
+    if (event.track.kind === 'video' && publishOwner === peerId) showVideo(stream);
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed') toast('Зв’язок перервався — перевір інтернет');
+  };
+  pc._lumaReady = syncLocalTracks(pc).then(async () => {
+    if (initiator) await sendOffer(pc, peerId);
+  }).catch(error => console.warn('Не вдалося підготувати медіа', error));
+  return pc;
+}
+
+function localTracks() {
+  const video = publishStream?.getVideoTracks()[0] || null;
+  const programAudio = publishStream?.getAudioTracks()[0] || null;
+  const microphone = micStream?.getAudioTracks()[0] || null;
+  return { video, audio:[programAudio, microphone] };
+}
+async function syncLocalTracks(pc) {
+  const tracks = localTracks();
+  const videoSender = pc._lumaSenders.video;
+  if (videoSender.track !== tracks.video) await videoSender.replaceTrack(tracks.video);
+  for (let index = 0; index < 2; index++) {
+    const sender = pc._lumaSenders.audio[index];
+    const track = tracks.audio[index];
+    if (sender.track !== track) await sender.replaceTrack(track);
+  }
+  const senders = [videoSender, ...pc._lumaSenders.audio];
+  for (const sender of senders) {
+    if (sender.track?.kind === 'video') await configureVideoSender(sender);
+  }
+}
+async function configureVideoSender(sender) {
+  try {
+    const parameters = sender.getParameters();
+    if (!parameters.encodings?.length) parameters.encodings = [{}];
+    const state = qualityState.get(sender) || { level:0, bad:0, good:0 };
+    qualityState.set(sender, state);
+    const perViewerBudget = Math.min(7_500_000, 15_000_000 / Math.max(1, connections.size));
+    parameters.encodings[0].maxBitrate = Math.max(700_000, perViewerBudget * qualityLevels[state.level].rate);
+    parameters.encodings[0].maxFramerate = 30;
+    parameters.encodings[0].scaleResolutionDownBy = qualityLevels[state.level].scale;
+    await sender.setParameters(parameters);
+  } catch (error) { console.debug('Браузер сам керує параметрами відео', error); }
+}
+function refreshSenderBudgets() {
+  for (const pc of connections.values()) {
+    const sender = pc._lumaSenders?.video;
+    if (sender?.track) configureVideoSender(sender);
+  }
+}
+async function sendOffer(pc, peerId) {
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  signal({ type:'signal', to:peerId, data:{ description:pc.localDescription } });
+}
+async function handleSignal(pc, peerId, data) {
+  try {
+    await pc._lumaReady;
+    if (data.description) {
+      await pc.setRemoteDescription(data.description);
+      for (const candidate of pc._pendingCandidates.splice(0)) await pc.addIceCandidate(candidate);
+      if (data.description.type === 'offer') {
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        signal({ type:'signal', to:peerId, data:{ description:pc.localDescription } });
+      }
+    } else if (data.candidate) {
+      if (pc.remoteDescription) await pc.addIceCandidate(data.candidate);
+      else pc._pendingCandidates.push(data.candidate);
+    }
+  } catch (error) { console.warn('Помилка узгодження WebRTC', error); }
+}
+
+const qualityLevels = [
+  { scale:1, rate:1 }, { scale:1.25, rate:0.76 }, { scale:1.5, rate:0.57 },
+  { scale:1.75, rate:0.4 }, { scale:2, rate:0.28 }
+];
+const qualityState = new WeakMap();
+async function adaptConnection(pc) {
+  const sender = pc._lumaSenders?.video;
+  if (!sender?.track || pc.connectionState !== 'connected') return;
+  try {
+    const stats = await pc.getStats();
+    let available = 0, loss = 0, reason = '';
+    for (const report of stats.values()) {
+      if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) available = report.availableOutgoingBitrate || available;
+      if (report.type === 'outbound-rtp' && report.kind === 'video') reason = report.qualityLimitationReason || reason;
+      if (report.type === 'remote-inbound-rtp' && (report.kind === 'video' || report.mediaType === 'video')) loss = Math.max(loss, report.fractionLost || 0);
+    }
+    const state = qualityState.get(sender) || { level:0, bad:0, good:0 };
+    const perViewerBudget = Math.min(7_500_000, 15_000_000 / Math.max(1, connections.size));
+    const targetBitrate = perViewerBudget * qualityLevels[state.level].rate;
+    const constrained = reason === 'bandwidth' || reason === 'cpu' || loss > 0.06 || (available > 0 && available < targetBitrate * 1.15);
+    if (constrained) { state.bad++; state.good=0; }
+    else { state.good++; state.bad=0; }
+    if (state.bad >= 2 && state.level < qualityLevels.length - 1) { state.level++; state.bad=0; }
+    else if (state.good >= 5 && available > targetBitrate * 1.7 && state.level > 0) { state.level--; state.good=0; }
+    const next = qualityLevels[state.level];
+    const parameters = sender.getParameters();
+    if (!parameters.encodings?.length) parameters.encodings = [{}];
+    parameters.encodings[0].maxBitrate = Math.max(700_000, perViewerBudget * next.rate);
+    parameters.encodings[0].maxFramerate = 30;
+    parameters.encodings[0].scaleResolutionDownBy = next.scale;
+    await sender.setParameters(parameters);
+    qualityState.set(sender, state);
+  } catch (error) { console.debug('Адаптація якості недоступна в цьому браузері', error); }
+}
+function startQualityMonitor() {
+  clearInterval(qualityTimer);
+  qualityTimer = setInterval(() => connections.forEach(pc => adaptConnection(pc)), 2500);
+}
+
+async function publish(stream, mode) {
+  publishStream = stream;
+  publishMode = mode;
+  publishOwner = myId;
+  for (const track of stream.getVideoTracks()) track.contentHint = mode === 'camera' ? 'motion' : 'detail';
+  if (mode === 'camera') {
+    const audio = stream.getAudioTracks()[0];
+    if (audio) { audio.enabled = micOn; }
+  }
+  showVideo(stream, { local:true });
+  updateStage(); renderPeople(); startQualityMonitor();
+  signal({ type:'sharing', active:true });
+  $('#startShare').querySelector('strong').textContent = 'Зупинити трансляцію';
+  $('#cameraActionText').textContent = 'Зупинити трансляцію';
+  $('#resolutionLabel').innerHTML = '2K <i></i> 30 FPS · АДАПТИВНО';
+  for (const pc of connections.values()) {
+    try { await syncLocalTracks(pc); }
+    catch (error) { console.warn('Не вдалося надіслати трансляцію учаснику', error); }
+  }
+  for (const track of stream.getTracks()) track.addEventListener('ended', stopPublishing, { once:true });
+  toast(mode === 'camera' ? 'Трансляція камери почалася' : 'Трансляція екрана почалася');
+}
+async function captureScreen() {
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    toast('Цей браузер не вміє ділитися екраном. На телефоні натисни «Транслювати камеру».');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video:{ width:{ ideal:2560 }, height:{ ideal:1440 }, frameRate:{ ideal:30, max:30 } },
+      audio:true
+    });
+    await publish(stream, 'screen');
+  } catch (error) {
+    if (error.name !== 'NotAllowedError') toast('Не вдалося почати трансляцію екрана в цьому браузері');
+  }
+}
+async function captureCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) { toast('Цей браузер не підтримує трансляцію камери'); return; }
+  try {
+    const constraints = {
+      video:{ facingMode:{ ideal:'environment' }, width:{ ideal:2560 }, height:{ ideal:1440 }, frameRate:{ ideal:30, max:30 } },
+      audio:true
+    };
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia(constraints); }
+    catch { stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'environment', frameRate:{ ideal:30, max:30 } }, audio:true }); }
+    await publish(stream, 'camera');
+  } catch (error) {
+    if (error.name === 'NotAllowedError') toast('Дозволь доступ до камери й мікрофона в браузері');
+    else toast('Не вдалося відкрити камеру. Перевір дозвіл і спробуй знову.');
+  }
+}
+async function stopPublishing() {
+  if (!publishStream) return;
+  const previous = publishStream;
+  const wasCamera = publishMode === 'camera';
+  publishStream = null; publishMode = '';
+  signal({ type:'sharing', active:false });
+  for (const pc of connections.values()) {
+    try { await syncLocalTracks(pc); } catch {}
+  }
+  previous.getTracks().forEach(track => track.stop());
+  if (wasCamera) {
+    micOn = false;
+    micStream?.getAudioTracks().forEach(track => { track.enabled = false; });
+    setMicUi();
+  }
+  publishOwner = '';
+  clearInterval(qualityTimer);
+  showVideo(null); updateStage(); renderPeople();
+  $('#startShare').querySelector('strong').textContent = 'Почати трансляцію';
+  $('#cameraActionText').textContent = 'Транслювати камеру телефона';
+  $('#resolutionLabel').innerHTML = '2K <i></i> 30 FPS · АДАПТИВНО';
+}
+$('#startShare').onclick = () => publishStream ? stopPublishing() : captureScreen();
+$('#startCamera').onclick = () => publishStream ? stopPublishing() : captureCamera();
+
+$('#micButton').onclick = async () => {
+  if (publishMode === 'camera' && publishStream?.getAudioTracks().length) {
+    micOn = !micOn;
+    publishStream.getAudioTracks().forEach(track => { track.enabled = micOn; });
+    setMicUi();
+    return;
+  }
+  if (!micStream) {
+    try { micStream = await navigator.mediaDevices.getUserMedia({ audio:true }); }
+    catch { toast('Дозволь доступ до мікрофона в браузері'); return; }
+  }
+  micOn = !micOn;
+  micStream.getAudioTracks().forEach(track => { track.enabled = micOn; });
+  if (micOn) for (const pc of connections.values()) await syncLocalTracks(pc).catch(() => {});
+  setMicUi();
+};
+$('#soundButton').onclick = () => {
+  soundOn = !soundOn;
+  $('#soundState').textContent = soundOn ? 'УВІМКН.' : 'ВИМКН.';
+  $('#soundState').classList.toggle('on', soundOn);
+  $('#mainVideo').muted = publishOwner === myId || !soundOn;
+};
+$('#expandButton').onclick = () => {
+  if (!document.fullscreenElement) $('#stage').requestFullscreen?.();
+  else document.exitFullscreen?.();
+};
+$('#leaveButton').onclick = () => {
+  rejectedFromRoom = true;
+  socket?.close();
+  publishStream?.getTracks().forEach(track => track.stop());
+  micStream?.getTracks().forEach(track => track.stop());
+  connections.forEach(pc => pc.close());
+  connections.clear(); roomPeers.clear();
+  toast('Ти вийшов із кімнати'); renderPeople();
+};
+
+document.addEventListener('keydown', event => { if (event.key === 'Escape') $('#modal').classList.remove('open'); });
+renderPeople();
