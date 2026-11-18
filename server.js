@@ -1,13 +1,59 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 
 const root = process.cwd();
 const rooms = new Map();
+let cloudflareIceCache = null, cloudflareIceCacheUntil = 0, cloudflareIceRequest = null;
 const mime = { '.html':'text/html; charset=utf-8', '.css':'text/css; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.json':'application/json' };
+async function getCloudflareIceServers() {
+  const keyId = process.env.CLOUDFLARE_TURN_KEY_ID;
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+  if (!keyId || !apiToken) return null;
+  if (cloudflareIceCache && cloudflareIceCacheUntil > Date.now()) return cloudflareIceCache;
+  if (cloudflareIceRequest) return cloudflareIceRequest;
+  cloudflareIceRequest = (async () => {
+    const response = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(keyId)}/credentials/generate-ice-servers`, {
+      method:'POST',
+      headers:{ 'Authorization':`Bearer ${apiToken}`, 'Content-Type':'application/json' },
+      body:JSON.stringify({ ttl:48 * 60 * 60 }),
+      signal:AbortSignal.timeout(8000)
+    });
+    if (!response.ok) throw new Error(`Cloudflare TURN credential request returned ${response.status}`);
+    const body = await response.json();
+    if (!Array.isArray(body.iceServers) || !body.iceServers.some(server => server?.urls)) throw new Error('Cloudflare returned no ICE servers');
+    cloudflareIceCache = body.iceServers;
+    cloudflareIceCacheUntil = Date.now() + 24 * 60 * 60 * 1000;
+    return cloudflareIceCache;
+  })();
+  try { return await cloudflareIceRequest; }
+  catch (error) { console.warn('Could not refresh Cloudflare TURN credentials:', error.message); return null; }
+  finally { cloudflareIceRequest = null; }
+}
 const server = http.createServer(async (req, res) => {
   const path = new URL(req.url, 'http://localhost').pathname;
+  if (path === '/healthz') { res.writeHead(200, { 'Content-Type':'text/plain; charset=utf-8' }).end('ok'); return; }
+  if (path === '/api/ice-servers') {
+    const iceServers = await getCloudflareIceServers() || [{ urls:['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
+    const turnUrls = String(process.env.TURN_URLS || '').split(',').map(value => value.trim()).filter(Boolean);
+    const hasTurnServer = iceServers.some(server => {
+      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+      return urls.some(url => typeof url === 'string' && (url.startsWith('turn:') || url.startsWith('turns:')));
+    });
+    if (!hasTurnServer && turnUrls.length) {
+      let username = process.env.TURN_USERNAME || '';
+      let credential = process.env.TURN_CREDENTIAL || '';
+      if (process.env.TURN_SHARED_SECRET) {
+        const expiresAt = Math.floor(Date.now() / 1000) + 12 * 60 * 60;
+        username = `${expiresAt}:${process.env.TURN_USERNAME || 'luma'}`;
+        credential = createHmac('sha1', process.env.TURN_SHARED_SECRET).update(username).digest('base64');
+      }
+      if (username && credential) iceServers.push({ urls:turnUrls, username, credential });
+    }
+    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store' }).end(JSON.stringify(iceServers));
+    return;
+  }
   const file = path === '/' ? 'index.html' : normalize(decodeURIComponent(path).replace(/^\/+/, ''));
   if (file.startsWith('..')) { res.writeHead(403).end(); return; }
   try {
@@ -76,6 +122,8 @@ server.on('upgrade', (req, socket) => {
         send(peer,{type:'joined',id:peer.id,peers:[...room.values()].filter(p=>p.id!==peer.id).map(p=>({id:p.id,name:p.name}))});
         for(const currentPeer of room.values()) if(currentPeer.id!==peer.id&&currentPeer.isSharing) send(peer,{type:'sharing',id:currentPeer.id,active:true});
         roomSend(room,{type:'peer-joined',id:peer.id,name:peer.name},peer.id);
+      }else if(msg.type==='ping'){
+        send(peer,{type:'pong'});
       }else if(msg.type==='signal'){
         const target=rooms.get(peer.room)?.get(String(msg.to||''));if(target)send(target,{type:'signal',from:peer.id,data:msg.data});
       }else if(msg.type==='name'){

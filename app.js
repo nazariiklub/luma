@@ -13,8 +13,10 @@ if (!userId) { userId = makeBrowserId(); localStorage.setItem('luma-user-id', us
 let myName = localStorage.getItem('luma-name') || '';
 let myId = userId;
 let socket, roomPeers = new Map(), connections = new Map(), remoteStreams = new Map(), roomJoined = false;
-let publishStream = null, publishMode = '', micStream = null, micOn = false, soundOn = true;
-let publishOwner = '', toastTimer, heartbeatTimer, qualityTimer, rejectedFromRoom = false;
+let publishStream = null, publishMode = '', micStream = null, micOn = false, soundOn = false;
+let publishOwner = '', toastTimer, heartbeatTimer, heartbeatTimeout, qualityTimer, reconnectTimer, reconnectAttempts = 0;
+let rejectedFromRoom = false, intentionalLeave = false, rtcConfigurationLoaded = false, rtcConfigLoading = false;
+let rtcIceServers = [{ urls:['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
 
 const colors = [
   'linear-gradient(135deg,#7f65b2,#bf8eb5)', 'linear-gradient(135deg,#4a8290,#8dc2ad)',
@@ -24,6 +26,7 @@ const colors = [
 $('#roomCode').textContent = `# LUMA-${roomId.slice(0, 4).toUpperCase()}`;
 $('#headerRoom').textContent = 'Очікує на вхід';
 $('#topAvatar').textContent = myName ? myName[0].toUpperCase() : '?';
+setSoundUi();
 
 function toast(message) {
   $('#toastText').textContent = message;
@@ -57,12 +60,26 @@ function setMicUi() {
   $('#micState').classList.toggle('on', micOn);
   $('#micButton').classList.toggle('muted', !micOn);
 }
+function setSoundUi() {
+  $('#soundState').textContent = soundOn ? 'УВІМКН.' : 'ВИМКН.';
+  $('#soundState').classList.toggle('on', soundOn);
+}
 function showVideo(stream, { local = false } = {}) {
   const video = $('#mainVideo');
   if (video.srcObject !== stream) video.srcObject = stream;
   video.muted = local || !soundOn;
   $('#stage').classList.toggle('video-active', !!stream);
   if (stream) video.play().catch(() => {});
+}
+async function loadRtcConfiguration() {
+  try {
+    const response = await fetch('/api/ice-servers', { cache:'no-store' });
+    if (!response.ok) throw new Error(`ICE config returned ${response.status}`);
+    const servers = await response.json();
+    if (Array.isArray(servers) && servers.some(server => server?.urls)) rtcIceServers = servers;
+  } catch (error) {
+    console.warn('Не вдалося завантажити ICE налаштування; буде використано STUN', error);
+  }
 }
 function updateStage() {
   const active = !!publishOwner;
@@ -132,17 +149,39 @@ $('#topAvatar').onclick = () => {
 };
 
 function setupSocket() {
+  if (socket?.readyState === WebSocket.CONNECTING || socket?.readyState === WebSocket.OPEN) return;
+  if (!rtcConfigurationLoaded) {
+    if (rtcConfigLoading) return;
+    rtcConfigLoading = true;
+    loadRtcConfiguration().finally(() => {
+      rtcConfigurationLoaded = true;
+      rtcConfigLoading = false;
+      setupSocket();
+    });
+    $('#headerRoom').textContent = 'Налаштування з’єднання…';
+    return;
+  }
+  intentionalLeave = false;
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   socket = new WebSocket(`${protocol}//${location.host}`);
   $('#headerRoom').textContent = 'Підключення…';
   socket.onopen = () => {
+    reconnectAttempts = 0;
     signal({ type:'join', room:roomId, userId, name:myName });
     clearInterval(heartbeatTimer);
-    heartbeatTimer = setInterval(() => signal({ type:'ping' }), 4 * 60 * 1000);
+    heartbeatTimer = setInterval(() => {
+      signal({ type:'ping' });
+      clearTimeout(heartbeatTimeout);
+      heartbeatTimeout = setTimeout(() => {
+        if (socket?.readyState === WebSocket.OPEN) socket.close();
+      }, 10000);
+    }, 25000);
   };
   socket.onmessage = async event => {
     const message = JSON.parse(event.data);
-    if (message.type === 'already-here') {
+    if (message.type === 'pong') {
+      clearTimeout(heartbeatTimeout);
+    } else if (message.type === 'already-here') {
       rejectedFromRoom = true;
       $('#headerRoom').textContent = 'Профіль уже в кімнаті';
       toast('Цей профіль уже відкритий у кімнаті в іншій вкладці');
@@ -159,6 +198,7 @@ function setupSocket() {
       roomPeers.clear();
       message.peers.forEach(person => roomPeers.set(person.id, person));
       renderPeople();
+      if (publishStream) signal({ type:'sharing', active:true });
     } else if (message.type === 'peer-joined') {
       roomPeers.set(message.id, { id:message.id, name:message.name });
       renderPeople();
@@ -200,9 +240,25 @@ function setupSocket() {
   };
   socket.onclose = () => {
     clearInterval(heartbeatTimer);
+    clearTimeout(heartbeatTimeout);
     roomJoined = false;
+    connections.forEach(pc => pc.close());
+    connections.clear();
+    remoteStreams.clear();
+    if (publishOwner !== myId) {
+      publishOwner = '';
+      showVideo(null);
+      updateStage();
+    }
     renderPeople();
-    if (!rejectedFromRoom) toast('З’єднання з кімнатою перервано');
+    if (!rejectedFromRoom && !intentionalLeave) {
+      $('#headerRoom').textContent = 'Зв’язок перервано';
+      toast('Зв’язок перервався. Підключаю кімнату знову…');
+      clearTimeout(reconnectTimer);
+      const delay = Math.min(1000 * (2 ** reconnectAttempts), 15000);
+      reconnectAttempts++;
+      reconnectTimer = setTimeout(setupSocket, delay);
+    }
   };
 }
 
@@ -213,7 +269,7 @@ function createRemoteStream(peerId) {
 }
 function makeConnection(peerId, initiator) {
   if (connections.has(peerId)) return connections.get(peerId);
-  const pc = new RTCPeerConnection({ iceServers:[{ urls:'stun:stun.l.google.com:19302' }] });
+  const pc = new RTCPeerConnection({ iceServers:rtcIceServers, iceCandidatePoolSize:4 });
   pc._pendingCandidates = [];
   pc._lumaSenders = {
     video: pc.addTransceiver('video', { direction:'sendrecv' }).sender,
@@ -436,9 +492,13 @@ $('#micButton').onclick = async () => {
 };
 $('#soundButton').onclick = () => {
   soundOn = !soundOn;
-  $('#soundState').textContent = soundOn ? 'УВІМКН.' : 'ВИМКН.';
-  $('#soundState').classList.toggle('on', soundOn);
-  $('#mainVideo').muted = publishOwner === myId || !soundOn;
+  setSoundUi();
+  const video = $('#mainVideo');
+  video.muted = publishOwner === myId || !soundOn;
+  if (soundOn && video.srcObject) video.play().catch(() => toast('Торкнися відео, щоб увімкнути звук'));
+};
+$('#mainVideo').onloadedmetadata = () => {
+  if ($('#stage').classList.contains('video-active')) $('#mainVideo').play().catch(() => {});
 };
 $('#expandButton').onclick = () => {
   if (!document.fullscreenElement) $('#stage').requestFullscreen?.();
@@ -446,6 +506,8 @@ $('#expandButton').onclick = () => {
 };
 $('#leaveButton').onclick = () => {
   rejectedFromRoom = true;
+  intentionalLeave = true;
+  clearTimeout(reconnectTimer);
   socket?.close();
   roomJoined = false;
   $('#headerRoom').textContent = 'Ти вийшов із кімнати';
