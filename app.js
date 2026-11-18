@@ -12,7 +12,7 @@ let userId = localStorage.getItem('luma-user-id');
 if (!userId) { userId = makeBrowserId(); localStorage.setItem('luma-user-id', userId); }
 let myName = localStorage.getItem('luma-name') || '';
 let myId = userId;
-let socket, roomPeers = new Map(), connections = new Map(), remoteStreams = new Map();
+let socket, roomPeers = new Map(), connections = new Map(), remoteStreams = new Map(), roomJoined = false;
 let publishStream = null, publishMode = '', micStream = null, micOn = false, soundOn = true;
 let publishOwner = '', toastTimer, heartbeatTimer, qualityTimer, rejectedFromRoom = false;
 
@@ -22,7 +22,7 @@ const colors = [
 ];
 
 $('#roomCode').textContent = `# LUMA-${roomId.slice(0, 4).toUpperCase()}`;
-$('#headerRoom').textContent = `Кімната LUMA-${roomId.slice(0, 4).toUpperCase()}`;
+$('#headerRoom').textContent = 'Очікує на вхід';
 $('#topAvatar').textContent = myName ? myName[0].toUpperCase() : '?';
 
 function toast(message) {
@@ -72,19 +72,27 @@ function updateStage() {
 }
 
 function renderPeople() {
-  const people = [{ id:myId, name:myName || 'Ти', me:true }, ...roomPeers.values()];
+  const people = roomJoined ? [{ id:myId, name:myName || 'Ти', me:true }, ...roomPeers.values()] : [];
   $('#viewerCount').textContent = people.length;
   $('#capacityLabel').innerHTML = `${String(people.length).padStart(2, '0')} <i>/</i> 04 МІСЦЯ`;
+  $('#startShare').disabled = !roomJoined && !publishStream;
+  $('#startCamera').disabled = !roomJoined && !publishStream;
   $('#miniAvatars').innerHTML = people.map((person, index) =>
     `<span class="mini-avatar ${person.me ? 'mini-me' : ''}" style="background:${person.me ? 'linear-gradient(135deg,#8b69c9,#d67fb2)' : colors[(index - 1) % 4]}">${escapeHtml(person.name[0] || 'Г')}</span>`
   ).join('');
   const occupied = people.map((person, index) => {
     const broadcasting = publishOwner === person.id;
+    const peerState = person.me ? 'self' : connections.get(person.id)?.connectionState || 'waiting';
+    const connectionLabel = peerState === 'connected' ? 'З’єднання готове'
+      : peerState === 'failed' ? 'Мережа блокує зв’язок'
+      : peerState === 'connecting' || peerState === 'new' ? 'З’єднується…'
+      : peerState === 'disconnected' ? 'Зв’язок перервано'
+      : 'У кімнаті';
     return `<div class="person-card ${person.me ? 'me' : ''} ${broadcasting ? 'speaking' : ''}">
       <span class="person-avatar" style="background:${person.me ? 'linear-gradient(135deg,#8b69c9,#d67fb2)' : colors[(index - 1) % 4]}">${escapeHtml(person.name[0] || 'Г')}</span>
       <span class="person-info"><span class="person-name">${escapeHtml(person.me ? myName : person.name)}${person.me ? ' (це ти)' : ''}</span>
-      <span class="person-role">${broadcasting ? 'Транслює зараз' : person.me ? 'Твій профіль' : 'У кімнаті'}</span></span>
-      <span class="person-presence ${broadcasting ? 'broadcasting' : 'online'}"></span></div>`;
+      <span class="person-role">${broadcasting ? 'Транслює зараз' : person.me ? 'Твій профіль' : connectionLabel}</span></span>
+      <span class="person-presence ${broadcasting ? 'broadcasting' : peerState === 'failed' ? 'offline' : 'online'}"></span></div>`;
   }).join('');
   const empty = Array.from({ length:Math.max(0, 4 - people.length) }, () =>
     '<div class="person-card empty"><span class="empty-add">+</span><span class="empty-person">Вільне місце<small>Запроси друга</small></span></div>'
@@ -126,6 +134,7 @@ $('#topAvatar').onclick = () => {
 function setupSocket() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   socket = new WebSocket(`${protocol}//${location.host}`);
+  $('#headerRoom').textContent = 'Підключення…';
   socket.onopen = () => {
     signal({ type:'join', room:roomId, userId, name:myName });
     clearInterval(heartbeatTimer);
@@ -135,14 +144,18 @@ function setupSocket() {
     const message = JSON.parse(event.data);
     if (message.type === 'already-here') {
       rejectedFromRoom = true;
+      $('#headerRoom').textContent = 'Профіль уже в кімнаті';
       toast('Цей профіль уже відкритий у кімнаті в іншій вкладці');
       socket.close();
     } else if (message.type === 'full') {
       rejectedFromRoom = true;
+      $('#headerRoom').textContent = 'Кімната заповнена';
       toast('У цій кімнаті вже 4 учасники');
       socket.close();
     } else if (message.type === 'joined') {
       myId = message.id;
+      roomJoined = true;
+      $('#headerRoom').textContent = `Кімната LUMA-${roomId.slice(0, 4).toUpperCase()}`;
       roomPeers.clear();
       message.peers.forEach(person => roomPeers.set(person.id, person));
       renderPeople();
@@ -180,10 +193,15 @@ function setupSocket() {
     }
   };
   socket.onerror = () => {
-    if (!rejectedFromRoom) toast('Не вдалося з’єднатися із сервером кімнати');
+    if (!rejectedFromRoom) {
+      $('#headerRoom').textContent = 'Немає зв’язку з кімнатою';
+      toast('Не вдалося з’єднатися із сервером кімнати');
+    }
   };
   socket.onclose = () => {
     clearInterval(heartbeatTimer);
+    roomJoined = false;
+    renderPeople();
     if (!rejectedFromRoom) toast('З’єднання з кімнатою перервано');
   };
 }
@@ -212,7 +230,8 @@ function makeConnection(peerId, initiator) {
     if (event.track.kind === 'video' && publishOwner === peerId) showVideo(stream);
   };
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed') toast('Зв’язок перервався — перевір інтернет');
+    renderPeople();
+    if (pc.connectionState === 'failed') toast('Мережа не пропускає WebRTC. Для цієї мережі може знадобитися TURN.');
   };
   pc._lumaReady = syncLocalTracks(pc).then(async () => {
     if (initiator) await sendOffer(pc, peerId);
@@ -428,6 +447,8 @@ $('#expandButton').onclick = () => {
 $('#leaveButton').onclick = () => {
   rejectedFromRoom = true;
   socket?.close();
+  roomJoined = false;
+  $('#headerRoom').textContent = 'Ти вийшов із кімнати';
   publishStream?.getTracks().forEach(track => track.stop());
   micStream?.getTracks().forEach(track => track.stop());
   connections.forEach(pc => pc.close());
