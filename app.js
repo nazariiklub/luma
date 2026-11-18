@@ -14,7 +14,7 @@ let myName = localStorage.getItem('luma-name') || '';
 let myId = userId;
 let socket, roomPeers = new Map(), connections = new Map(), remoteStreams = new Map(), roomJoined = false;
 let publishStream = null, publishMode = '', micStream = null, micOn = false, soundOn = false;
-let publishOwner = '', toastTimer, heartbeatTimer, heartbeatTimeout, qualityTimer, reconnectTimer, reconnectAttempts = 0;
+let publishOwner = '', toastTimer, streamWaitTimer, heartbeatTimer, heartbeatTimeout, qualityTimer, reconnectTimer, reconnectAttempts = 0;
 let rejectedFromRoom = false, intentionalLeave = false, rtcConfigurationLoaded = false, rtcConfigLoading = false;
 let rtcIceServers = [{ urls:['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
 
@@ -83,9 +83,11 @@ async function loadRtcConfiguration() {
 }
 function updateStage() {
   const active = !!publishOwner;
+  const video = $('#mainVideo');
+  const waitingForRemoteVideo = active && publishOwner !== myId && !(video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0);
   $('#streamBadge').classList.toggle('active', active);
-  $('#stageTitle').textContent = active ? 'ЗАРАЗ ДИВИТЕСЬ РАЗОМ' : 'ЗАЛ ОЧІКУВАННЯ';
-  $('#stageHint').textContent = active ? 'Трансляція наживо · адаптивна якість' : 'Твоя кімната чекає на прем’єру';
+  $('#stageTitle').textContent = waitingForRemoteVideo ? 'ПІДКЛЮЧАЄМО ВІДЕО…' : active ? 'ЗАРАЗ ДИВИТЕСЬ РАЗОМ' : 'ЗАЛ ОЧІКУВАННЯ';
+  $('#stageHint').textContent = waitingForRemoteVideo ? 'Створюємо відеозв’язок між пристроями' : active ? 'Трансляція наживо · адаптивна якість' : 'Твоя кімната чекає на прем’єру';
 }
 
 function renderPeople() {
@@ -218,8 +220,18 @@ function setupSocket() {
     } else if (message.type === 'sharing') {
       if (message.active) {
         publishOwner = message.id;
-        if (message.id !== myId) showVideo(remoteStreams.get(message.id) || null);
+        if (message.id !== myId) {
+          showVideo(remoteStreams.get(message.id) || null);
+          clearTimeout(streamWaitTimer);
+          streamWaitTimer = setTimeout(() => {
+            const video = $('#mainVideo');
+            if (publishOwner === message.id && !(video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0)) {
+              toast('Кімнату видно, але відео не дійшло. Перевірте мережу або TURN-з’єднання.');
+            }
+          }, 10000);
+        }
       } else if (publishOwner === message.id) {
+        clearTimeout(streamWaitTimer);
         publishOwner = '';
         showVideo(null);
       }
@@ -229,7 +241,7 @@ function setupSocket() {
       if (publishOwner === myId) stopPublishing();
     } else if (message.type === 'signal') {
       const pc = connections.get(message.from) || makeConnection(message.from, false);
-      await handleSignal(pc, message.from, message.data);
+      await queueSignal(pc, message.from, message.data);
     }
   };
   socket.onerror = () => {
@@ -280,15 +292,39 @@ function makeConnection(peerId, initiator) {
   };
   connections.set(peerId, pc);
   pc.onicecandidate = event => { if (event.candidate) signal({ type:'signal', to:peerId, data:{ candidate:event.candidate } }); };
+  pc.onicecandidateerror = event => console.debug('ICE candidate error', event.errorCode, event.errorText);
   pc.ontrack = event => {
-    const stream = createRemoteStream(peerId);
+    const stream = event.streams?.[0] || createRemoteStream(peerId);
+    remoteStreams.set(peerId, stream);
     if (!stream.getTracks().some(track => track.id === event.track.id)) stream.addTrack(event.track);
-    if (event.track.kind === 'video' && publishOwner === peerId) showVideo(stream);
+    const showRemote = () => {
+      if (event.track.kind === 'video' && publishOwner === peerId) {
+        showVideo(stream);
+        updateStage();
+      }
+    };
+    event.track.onunmute = showRemote;
+    showRemote();
   };
   pc.onconnectionstatechange = () => {
     renderPeople();
-    if (pc.connectionState === 'failed') toast('Мережа не пропускає WebRTC. Для цієї мережі може знадобитися TURN.');
+    if (pc.connectionState === 'failed') {
+      toast('Прямий відеозв’язок не пройшов. Перезапускаю ICE-з’єднання…');
+      if (pc._offerer && pc._iceRestartAttempts < 2) {
+        pc._iceRestartAttempts++;
+        setTimeout(() => restartIceConnection(pc, peerId), 500 * pc._iceRestartAttempts);
+      } else if (!rtcIceServers.some(server => {
+        const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+        return urls.some(url => typeof url === 'string' && (url.startsWith('turn:') || url.startsWith('turns:')));
+      })) {
+        setTimeout(() => {
+          if (pc.connectionState === 'failed') toast('Ці мережі потребують TURN. Додай TURN-ключі в налаштування Render.');
+        }, 5000);
+      }
+    }
   };
+  pc._offerer = initiator;
+  pc._iceRestartAttempts = 0;
   pc._lumaReady = syncLocalTracks(pc).then(async () => {
     if (initiator) await sendOffer(pc, peerId);
   }).catch(error => console.warn('Не вдалося підготувати медіа', error));
@@ -335,9 +371,19 @@ function refreshSenderBudgets() {
   }
 }
 async function sendOffer(pc, peerId) {
+  if (pc.signalingState !== 'stable') return;
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   signal({ type:'signal', to:peerId, data:{ description:pc.localDescription } });
+}
+async function restartIceConnection(pc, peerId) {
+  if (connections.get(peerId) !== pc || pc.connectionState !== 'failed' || pc.signalingState !== 'stable') return;
+  try {
+    pc.restartIce?.();
+    const offer = await pc.createOffer({ iceRestart:true });
+    await pc.setLocalDescription(offer);
+    signal({ type:'signal', to:peerId, data:{ description:pc.localDescription } });
+  } catch (error) { console.warn('ICE restart failed', error); }
 }
 async function handleSignal(pc, peerId, data) {
   try {
@@ -355,6 +401,12 @@ async function handleSignal(pc, peerId, data) {
       else pc._pendingCandidates.push(data.candidate);
     }
   } catch (error) { console.warn('Помилка узгодження WebRTC', error); }
+}
+function queueSignal(pc, peerId, data) {
+  pc._signalQueue = (pc._signalQueue || Promise.resolve())
+    .then(() => handleSignal(pc, peerId, data))
+    .catch(error => console.warn('Помилка черги сигналів WebRTC', error));
+  return pc._signalQueue;
 }
 
 const qualityLevels = [
@@ -412,7 +464,7 @@ async function publish(stream, mode) {
   $('#cameraActionText').textContent = 'Зупинити трансляцію';
   $('#resolutionLabel').innerHTML = '2K <i></i> 30 FPS · АДАПТИВНО';
   for (const pc of connections.values()) {
-    try { await syncLocalTracks(pc); }
+    try { await pc._lumaReady; await syncLocalTracks(pc); }
     catch (error) { console.warn('Не вдалося надіслати трансляцію учаснику', error); }
   }
   for (const track of stream.getTracks()) track.addEventListener('ended', stopPublishing, { once:true });
@@ -456,7 +508,7 @@ async function stopPublishing() {
   publishStream = null; publishMode = '';
   signal({ type:'sharing', active:false });
   for (const pc of connections.values()) {
-    try { await syncLocalTracks(pc); } catch {}
+    try { await pc._lumaReady; await syncLocalTracks(pc); } catch {}
   }
   previous.getTracks().forEach(track => track.stop());
   if (wasCamera) {
@@ -487,7 +539,10 @@ $('#micButton').onclick = async () => {
   }
   micOn = !micOn;
   micStream.getAudioTracks().forEach(track => { track.enabled = micOn; });
-  if (micOn) for (const pc of connections.values()) await syncLocalTracks(pc).catch(() => {});
+  if (micOn) for (const pc of connections.values()) {
+    await pc._lumaReady;
+    await syncLocalTracks(pc).catch(() => {});
+  }
   setMicUi();
 };
 $('#soundButton').onclick = () => {
@@ -500,6 +555,8 @@ $('#soundButton').onclick = () => {
 $('#mainVideo').onloadedmetadata = () => {
   if ($('#stage').classList.contains('video-active')) $('#mainVideo').play().catch(() => {});
 };
+$('#mainVideo').onloadeddata = updateStage;
+$('#mainVideo').onplaying = updateStage;
 $('#expandButton').onclick = () => {
   if (!document.fullscreenElement) $('#stage').requestFullscreen?.();
   else document.exitFullscreen?.();
